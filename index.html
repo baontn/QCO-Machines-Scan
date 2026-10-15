@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Machine Staging</title>
+<style>
+  *{box-sizing:border-box}
+  body{margin:0;font-family:system-ui,Arial,sans-serif;background:#f3f4f6;color:#111}
+  header{background:#1d4ed8;color:#fff;padding:12px 16px;font-size:18px;font-weight:600}
+  .tabs{display:flex}
+  .tabs button{flex:1;padding:12px;border:0;background:#e5e7eb;font-size:16px}
+  .tabs button.on{background:#fff;font-weight:700;border-bottom:3px solid #1d4ed8}
+  section{padding:12px}
+  input,select{width:100%;padding:12px;margin:4px 0;font-size:16px;border:1px solid #9ca3af;border-radius:8px;background:#fff}
+  .row{display:flex;gap:8px}
+  button.big{width:100%;padding:14px;margin:6px 0;font-size:16px;border:0;border-radius:8px;background:#111827;color:#fff}
+  button.green{background:#15803d;font-weight:700;font-size:18px;padding:18px}
+  button.grey{background:#6b7280}
+  #reader{width:100%;margin-top:8px}
+  #msg{margin:8px 0;padding:12px;border-radius:8px;font-size:16px;min-height:44px;background:#e5e7eb}
+  #msg.ok{background:#dcfce7;color:#166534}
+  #msg.err{background:#fee2e2;color:#991b1b;font-weight:600}
+  #prompt{font-size:18px;font-weight:700;margin:8px 0;color:#1d4ed8}
+  .sess{background:#fff;border-radius:8px;padding:12px;margin:8px 0;border-left:6px solid #1d4ed8}
+  .sess b{font-size:18px}
+  details{background:#fff;border-radius:8px;margin:8px 0;padding:10px}
+  summary{font-weight:600;font-size:16px}
+  .mrow{display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-top:1px solid #eee}
+  .mrow button{padding:8px 12px;border:0;border-radius:6px;background:#dc2626;color:#fff}
+  small{color:#6b7280}
+</style>
+</head>
+<body>
+<header>Machine Staging</header>
+<div class="tabs">
+  <button id="t1" class="on">Session</button>
+  <button id="t2">Prep area</button>
+</div>
+
+<section id="p1">
+  <div class="row">
+    <input id="user" placeholder="Your name">
+    <select id="floor" style="width:110px">
+      <option value="1">Floor 1</option><option value="2">Floor 2</option>
+      <option value="3">Floor 3</option><option value="4">Floor 4</option><option value="5">Floor 5</option>
+    </select>
+  </div>
+
+  <div id="startBox">
+    <div id="prompt">Scan LINE QR</div>
+    <div id="tmpInfo"></div>
+  </div>
+
+  <div id="sessBox" hidden>
+    <div class="sess">
+      <div>Floor <b id="sFloor"></b> | Line <b id="sLine"></b> | Style <b id="sStyle"></b></div>
+      <div style="margin-top:6px">Machines prepared: <b id="sCount">0</b></div>
+    </div>
+    <div id="prompt2" style="font-weight:700;color:#1d4ed8">Scan machine QR codes</div>
+    <button class="big green" id="releaseBtn">LOADING: RELEASE ALL</button>
+    <button class="big grey" id="leaveBtn">Change session (keep machines)</button>
+  </div>
+
+  <div id="reader"></div>
+  <button class="big" id="scanBtn">Start camera</button>
+  <div class="row">
+    <input id="manual" placeholder="Or type code">
+    <button class="big" id="manualBtn" style="width:90px">OK</button>
+  </div>
+  <div id="msg">Ready</div>
+
+  <div id="mlist"></div>
+</section>
+
+<section id="p2" hidden>
+  <button class="big" id="refresh">Refresh</button>
+  <h3 id="total"></h3>
+  <div id="list"></div>
+</section>
+
+<script src="https://cdn.jsdelivr.net/npm/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+<script>
+const API = 'https://script.google.com/macros/s/AKfycbysv08pf1s1pBRL0dMC0redCu9vO1y6KpfzjV-oFIrwKbSYbKEpIy1NNMYnSjUchn8b/exec';
+const $ = id => document.getElementById(id);
+let sess = null, tmp = {}, scanner = null, last = '', lastT = 0, busy = false, machines = [];
+
+try { sess = JSON.parse(localStorage.getItem('ms_session') || 'null'); } catch(e){}
+try { $('user').value = localStorage.getItem('ms_user') || ''; $('floor').value = localStorage.getItem('ms_floor') || '1'; } catch(e){}
+
+function saveBasics(){ try{ localStorage.setItem('ms_user', $('user').value); localStorage.setItem('ms_floor', $('floor').value); }catch(e){} }
+function saveSess(){ try{ if(sess) localStorage.setItem('ms_session', JSON.stringify(sess)); else localStorage.removeItem('ms_session'); }catch(e){} }
+
+function show(text, cls){
+  const m = $('msg'); m.textContent = text; m.className = cls || '';
+  if(navigator.vibrate && cls) navigator.vibrate(cls==='ok' ? 60 : [150,80,150]);
+}
+
+async function api(body){
+  const r = await fetch(API, { method:'POST', headers:{'Content-Type':'text/plain;charset=utf-8'}, body: JSON.stringify(body) });
+  return r.json();
+}
+
+function view(){
+  $('startBox').hidden = !!sess;
+  $('sessBox').hidden = !sess;
+  $('floor').disabled = !!sess;
+  if(sess){
+    $('sFloor').textContent = sess.floor; $('sLine').textContent = sess.line; $('sStyle').textContent = sess.style;
+    $('sCount').textContent = machines.length;
+    renderMachines();
+  } else {
+    $('prompt').textContent = tmp.line ? 'Scan STYLE QR' : 'Scan LINE QR';
+    $('tmpInfo').textContent = tmp.line ? 'Line: ' + tmp.line : '';
+    $('mlist').innerHTML = '';
+  }
+}
+
+function renderMachines(){
+  const box = $('mlist'); box.innerHTML = '';
+  if(!machines.length) return;
+  const d = document.createElement('details'); d.open = true;
+  const sm = document.createElement('summary'); sm.textContent = 'Machines in this session (' + machines.length + ')';
+  d.appendChild(sm);
+  machines.slice().reverse().forEach(it => {
+    const row = document.createElement('div'); row.className = 'mrow';
+    const sp = document.createElement('span'); sp.textContent = it.machine;
+    const b = document.createElement('button'); b.textContent = 'Remove';
+    b.onclick = async () => {
+      if(!confirm('Remove ' + it.machine + ' from this session?')) return;
+      const res = await api({ action:'remove', machine: it.machine, user: $('user').value.trim() });
+      show(res.ok ? res.msg : res.error, res.ok ? 'ok' : 'err');
+      refreshSession();
+    };
+    row.append(sp, b); d.appendChild(row);
+  });
+  box.appendChild(d);
+}
+
+async function refreshSession(){
+  if(!sess) return;
+  try{
+    const r = await (await fetch(API + '?action=list')).json();
+    machines = (r.rows || []).filter(x => x.floor === sess.floor && x.line === sess.line && x.style === sess.style);
+  }catch(e){ show('Network error: ' + e.message, 'err'); }
+  view();
+}
+
+async function handle(raw){
+  const code = String(raw).trim().toUpperCase();
+  if(!code) return;
+  if(!$('user').value.trim()){ show('Enter your name first', 'err'); return; }
+  saveBasics();
+
+  if(!sess){
+    // session start: Line QR then Style QR
+    const m = code.match(/^(LINE|STYLE)\s*[:=]\s*(.+)$/);
+    const kind = m ? m[1].toLowerCase() : (tmp.line ? 'style' : 'line');
+    const val = m ? m[2].trim() : code;
+    if(kind === 'line'){
+      tmp.line = val; show('Line: ' + val + '. Now scan STYLE QR', 'ok'); view();
+    } else {
+      if(!tmp.line){ show('Scan LINE QR first', 'err'); return; }
+      sess = { floor: $('floor').value, line: tmp.line, style: val, user: $('user').value.trim() };
+      tmp = {}; saveSess(); machines = [];
+      show('Session started: Line ' + sess.line + ', Style ' + sess.style, 'ok');
+      await refreshSession();
+    }
+    return;
+  }
+
+  // machine scan
+  show('Processing ' + code + '...', '');
+  try{
+    const res = await api({ action:'prepare', machine: code, floor: sess.floor, line: sess.line, style: sess.style, user: $('user').value.trim() });
+    if(res.ok){ show(res.msg, res.dup ? '' : 'ok'); await refreshSession(); }
+    else show(res.error, 'err');
+  }catch(e){ show('Network error: ' + e.message, 'err'); }
+}
+
+async function onScan(txt){
+  const now = Date.now();
+  if(busy || (txt === last && now - lastT < 3000)) return;
+  last = txt; lastT = now; busy = true;
+  try{ await handle(txt); } finally { busy = false; }
+}
+
+async function toggleCam(){
+  if(scanner){
+    try{ await scanner.stop(); scanner.clear(); }catch(e){}
+    scanner = null; $('scanBtn').textContent = 'Start camera'; return;
+  }
+  scanner = new Html5Qrcode('reader');
+  try{
+    await scanner.start({ facingMode:'environment' }, { fps:10, qrbox:{ width:240, height:240 } }, onScan);
+    $('scanBtn').textContent = 'Stop camera';
+  }catch(e){ scanner = null; show('Camera error: ' + e, 'err'); }
+}
+
+$('releaseBtn').onclick = async () => {
+  if(!machines.length){ show('No machines in this session', 'err'); return; }
+  if(!confirm('Release ' + machines.length + ' machines to Line ' + sess.line + '?')) return;
+  try{
+    const res = await api({ action:'release', floor: sess.floor, line: sess.line, style: sess.style, user: $('user').value.trim() });
+    if(res.ok){ show(res.msg + ' to Line ' + sess.line, 'ok'); sess = null; machines = []; saveSess(); view(); }
+    else show(res.error, 'err');
+  }catch(e){ show('Network error: ' + e.message, 'err'); }
+};
+
+$('leaveBtn').onclick = () => {
+  if(!confirm('Leave this session? Machines stay in prep area until released.')) return;
+  sess = null; machines = []; tmp = {}; saveSess(); view(); show('Session closed', '');
+};
+
+function tab(n){
+  $('p1').hidden = n!==1; $('p2').hidden = n!==2;
+  $('t1').classList.toggle('on', n===1); $('t2').classList.toggle('on', n===2);
+  if(n===2) loadList();
+}
+
+async function loadList(){
+  $('list').textContent = 'Loading...';
+  try{
+    const r = await (await fetch(API + '?action=list')).json();
+    const rows = r.rows || [], g = {};
+    rows.forEach(x => { const k = x.floor + '|' + x.line + '|' + x.style; (g[k] = g[k] || []).push(x); });
+    $('total').textContent = 'Total in prep area: ' + rows.length;
+    const box = $('list'); box.innerHTML = '';
+    const keys = Object.keys(g).sort();
+    if(!keys.length){ box.textContent = 'Prep area is empty.'; return; }
+    keys.forEach(k => {
+      const [f,l,s] = k.split('|');
+      const d = document.createElement('details');
+      const sm = document.createElement('summary');
+      sm.textContent = 'Floor ' + f + ' | Line ' + l + ' | ' + s + '  -  ' + g[k].length;
+      d.appendChild(sm);
+      g[k].forEach(it => { const row = document.createElement('div'); row.className = 'mrow'; row.textContent = it.machine; d.appendChild(row); });
+      box.appendChild(d);
+    });
+  }catch(e){ $('list').textContent = 'Error: ' + e.message; }
+}
+
+$('t1').onclick = () => tab(1);
+$('t2').onclick = () => tab(2);
+$('scanBtn').onclick = toggleCam;
+$('refresh').onclick = loadList;
+$('manualBtn').onclick = () => { handle($('manual').value); $('manual').value = ''; };
+$('user').addEventListener('change', saveBasics);
+$('floor').addEventListener('change', saveBasics);
+
+view();
+if(sess) refreshSession();
+</script>
+</body>
+</html>
