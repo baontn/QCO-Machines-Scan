@@ -28,7 +28,8 @@
   summary{font-weight:600;font-size:16px}
   .mrow{display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-top:1px solid #eee}
   .mrow button{padding:8px 12px;border:0;border-radius:6px;background:#dc2626;color:#fff}
-  small{color:#6b7280}
+  .mrow button.res{background:#1d4ed8}
+  h4{margin:14px 0 4px}
 </style>
 </head>
 <body>
@@ -50,6 +51,12 @@
   <div id="startBox">
     <div id="prompt">Scan LINE QR</div>
     <div id="tmpInfo"></div>
+    <div id="pendingBox" hidden>
+      <button class="big green" id="startBtn">START</button>
+      <button class="big grey" id="cancelBtn">Cancel / rescan</button>
+    </div>
+    <h4>Open sessions (machines still in prep area)</h4>
+    <div id="openList">Loading...</div>
   </div>
 
   <div id="sessBox" hidden>
@@ -57,9 +64,9 @@
       <div>Floor <b id="sFloor"></b> | Line <b id="sLine"></b> | Style <b id="sStyle"></b></div>
       <div style="margin-top:6px">Machines prepared: <b id="sCount">0</b></div>
     </div>
-    <div id="prompt2" style="font-weight:700;color:#1d4ed8">Scan machine QR codes</div>
+    <div style="font-weight:700;color:#1d4ed8">Scan machine QR codes</div>
     <button class="big green" id="releaseBtn">LOADING: RELEASE ALL</button>
-    <button class="big grey" id="leaveBtn">Change session (keep machines)</button>
+    <button class="big grey" id="leaveBtn">Close session (keep machines)</button>
   </div>
 
   <div id="reader"></div>
@@ -87,6 +94,7 @@ let sess = null, tmp = {}, scanner = null, last = '', lastT = 0, busy = false, m
 
 try { sess = JSON.parse(localStorage.getItem('ms_session') || 'null'); } catch(e){}
 try { $('user').value = localStorage.getItem('ms_user') || ''; $('floor').value = localStorage.getItem('ms_floor') || '1'; } catch(e){}
+if(sess) $('floor').value = sess.floor;
 
 function saveBasics(){ try{ localStorage.setItem('ms_user', $('user').value); localStorage.setItem('ms_floor', $('floor').value); }catch(e){} }
 function saveSess(){ try{ if(sess) localStorage.setItem('ms_session', JSON.stringify(sess)); else localStorage.removeItem('ms_session'); }catch(e){} }
@@ -110,10 +118,42 @@ function view(){
     $('sCount').textContent = machines.length;
     renderMachines();
   } else {
-    $('prompt').textContent = tmp.line ? 'Scan STYLE QR' : 'Scan LINE QR';
-    $('tmpInfo').textContent = tmp.line ? 'Line: ' + tmp.line : '';
+    const ready = tmp.line && tmp.style;
+    $('prompt').textContent = !tmp.line ? 'Scan LINE QR' : (!tmp.style ? 'Scan STYLE QR' : 'Check, then press START');
+    $('tmpInfo').textContent = tmp.line ? ('Line: ' + tmp.line + (tmp.style ? '  |  Style: ' + tmp.style : '')) : '';
+    $('pendingBox').hidden = !ready;
     $('mlist').innerHTML = '';
   }
+}
+
+async function loadOpen(){
+  const box = $('openList'); box.textContent = 'Loading...';
+  try{
+    const r = await (await fetch(API + '?action=list')).json();
+    const g = {};
+    (r.rows || []).forEach(x => { const k = x.floor + '|' + x.line + '|' + x.style; g[k] = (g[k] || 0) + 1; });
+    const keys = Object.keys(g).sort();
+    box.innerHTML = '';
+    if(!keys.length){ box.textContent = 'None'; return; }
+    keys.forEach(k => {
+      const [f,l,s] = k.split('|');
+      const row = document.createElement('div'); row.className = 'mrow';
+      const sp = document.createElement('span'); sp.textContent = 'F' + f + ' | ' + l + ' | ' + s + ' (' + g[k] + ')';
+      const b = document.createElement('button'); b.className = 'res'; b.textContent = 'Resume';
+      b.onclick = () => startSession(f, l, s);
+      row.append(sp, b); box.appendChild(row);
+    });
+  }catch(e){ box.textContent = 'Error: ' + e.message; }
+}
+
+async function startSession(floor, line, style){
+  if(!$('user').value.trim()){ show('Enter your name first', 'err'); return; }
+  saveBasics();
+  sess = { floor: String(floor), line: String(line), style: String(style), user: $('user').value.trim() };
+  $('floor').value = sess.floor;
+  tmp = {}; machines = []; saveSess(); view();
+  show('Session: Line ' + sess.line + ', Style ' + sess.style, 'ok');
+  await refreshSession();
 }
 
 function renderMachines(){
@@ -153,23 +193,16 @@ async function handle(raw){
   saveBasics();
 
   if(!sess){
-    // session start: Line QR then Style QR
     const m = code.match(/^(LINE|STYLE)\s*[:=]\s*(.+)$/);
-    const kind = m ? m[1].toLowerCase() : (tmp.line ? 'style' : 'line');
-    const val = m ? m[2].trim() : code;
-    if(kind === 'line'){
-      tmp.line = val; show('Line: ' + val + '. Now scan STYLE QR', 'ok'); view();
-    } else {
-      if(!tmp.line){ show('Scan LINE QR first', 'err'); return; }
-      sess = { floor: $('floor').value, line: tmp.line, style: val, user: $('user').value.trim() };
-      tmp = {}; saveSess(); machines = [];
-      show('Session started: Line ' + sess.line + ', Style ' + sess.style, 'ok');
-      await refreshSession();
-    }
+    if(m) tmp[m[1].toLowerCase()] = m[2].trim();
+    else if(!tmp.line) tmp.line = code;
+    else if(!tmp.style) tmp.style = code;
+    else { show('Press START or Cancel first', 'err'); return; }
+    view();
+    show(tmp.line && tmp.style ? 'Check Line and Style, then press START' : (tmp.line ? 'Line: ' + tmp.line + '. Now scan STYLE QR' : 'Style: ' + tmp.style + '. Now scan LINE QR'), 'ok');
     return;
   }
 
-  // machine scan
   show('Processing ' + code + '...', '');
   try{
     const res = await api({ action:'prepare', machine: code, floor: sess.floor, line: sess.line, style: sess.style, user: $('user').value.trim() });
@@ -197,25 +230,29 @@ async function toggleCam(){
   }catch(e){ scanner = null; show('Camera error: ' + e, 'err'); }
 }
 
+$('startBtn').onclick = () => startSession($('floor').value, tmp.line, tmp.style);
+$('cancelBtn').onclick = () => { tmp = {}; view(); show('Cleared. Scan LINE QR', ''); };
+
 $('releaseBtn').onclick = async () => {
   if(!machines.length){ show('No machines in this session', 'err'); return; }
   if(!confirm('Release ' + machines.length + ' machines to Line ' + sess.line + '?')) return;
   try{
     const res = await api({ action:'release', floor: sess.floor, line: sess.line, style: sess.style, user: $('user').value.trim() });
-    if(res.ok){ show(res.msg + ' to Line ' + sess.line, 'ok'); sess = null; machines = []; saveSess(); view(); }
+    if(res.ok){ show(res.msg + ' to Line ' + sess.line, 'ok'); sess = null; machines = []; saveSess(); view(); loadOpen(); }
     else show(res.error, 'err');
   }catch(e){ show('Network error: ' + e.message, 'err'); }
 };
 
 $('leaveBtn').onclick = () => {
-  if(!confirm('Leave this session? Machines stay in prep area until released.')) return;
-  sess = null; machines = []; tmp = {}; saveSess(); view(); show('Session closed', '');
+  if(!confirm('Close this session? Machines stay in prep area until released. You can resume it from the list.')) return;
+  sess = null; machines = []; tmp = {}; saveSess(); view(); loadOpen(); show('Session closed', '');
 };
 
 function tab(n){
   $('p1').hidden = n!==1; $('p2').hidden = n!==2;
   $('t1').classList.toggle('on', n===1); $('t2').classList.toggle('on', n===2);
   if(n===2) loadList();
+  if(n===1 && !sess) loadOpen();
 }
 
 async function loadList(){
@@ -249,7 +286,7 @@ $('user').addEventListener('change', saveBasics);
 $('floor').addEventListener('change', saveBasics);
 
 view();
-if(sess) refreshSession();
+if(sess) refreshSession(); else loadOpen();
 </script>
 </body>
 </html>
